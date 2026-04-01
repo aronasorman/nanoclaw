@@ -11,3 +11,6 @@
 import './telegram.js';
 
 // whatsapp
+
+// wsf (Worker Sync Forwarder)
+import './wsf.js';
