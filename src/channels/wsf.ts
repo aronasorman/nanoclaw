@@ -43,6 +43,7 @@ interface WsfMessage {
   threadId: string;
   sender: string;
   body: string;
+  details?: string;
   tag: string;
   createdAt: string;
 }
@@ -90,7 +91,10 @@ export class WsfChannel implements Channel {
   async connect(): Promise<void> {
     logger.info(`[wsf] Connecting to ${this.serverUrl} as ${this.botDid}`);
     this.connectWs();
-    this.pollTimer = setInterval(() => this.pollOpenThreads(), POLL_INTERVAL_MS);
+    this.pollTimer = setInterval(
+      () => this.pollOpenThreads(),
+      POLL_INTERVAL_MS,
+    );
     await this.pollOpenThreads();
     this.connected = true;
     logger.info('[wsf] Channel connected');
@@ -98,7 +102,9 @@ export class WsfChannel implements Channel {
 
   private connectWs(): void {
     if (this.stopping) return;
-    const wsUrl = this.serverUrl.replace(/^http/, 'ws') + `/ws?did=${encodeURIComponent(this.botDid)}`;
+    const wsUrl =
+      this.serverUrl.replace(/^http/, 'ws') +
+      `/ws?did=${encodeURIComponent(this.botDid)}`;
 
     this.ws = new WebSocket(wsUrl);
 
@@ -124,7 +130,9 @@ export class WsfChannel implements Channel {
           this.ensureThreadRegistered(jid);
         }
 
-        logger.info(`[wsf] WS message: ${msg.id} on ${msg.threadId} from ${msg.sender.slice(-8)}`);
+        logger.info(
+          `[wsf] WS message: ${msg.id} on ${msg.threadId} from ${msg.sender.slice(-8)}`,
+        );
         this.deliverMessage(msg);
       } catch {
         // skip unparseable messages
@@ -133,9 +141,14 @@ export class WsfChannel implements Channel {
 
     this.ws.on('close', () => {
       if (this.stopping) return;
-      logger.warn(`[wsf] WebSocket disconnected, reconnecting in ${this.reconnectDelay}ms`);
+      logger.warn(
+        `[wsf] WebSocket disconnected, reconnecting in ${this.reconnectDelay}ms`,
+      );
       setTimeout(() => this.connectWs(), this.reconnectDelay);
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, WS_RECONNECT_MAX_MS);
+      this.reconnectDelay = Math.min(
+        this.reconnectDelay * 2,
+        WS_RECONNECT_MAX_MS,
+      );
     });
 
     this.ws.on('error', (err: Error) => {
@@ -155,7 +168,8 @@ export class WsfChannel implements Channel {
       this.activeThreads.delete(threadId);
       // Check if the thread is closed; if so, clean up the dynamic folder
       this.maybeCleanupThread(threadId).catch((err) =>
-        logger.warn(`[wsf] Cleanup error for ${threadId}: ${err}`));
+        logger.warn(`[wsf] Cleanup error for ${threadId}: ${err}`),
+      );
     }
   }
 
@@ -164,7 +178,7 @@ export class WsfChannel implements Channel {
     try {
       const resp = await fetch(`${this.serverUrl}/threads/${threadId}`);
       if (!resp.ok) return;
-      const thread: WsfThread = await resp.json() as WsfThread;
+      const thread: WsfThread = (await resp.json()) as WsfThread;
       if (thread.status !== 'closed') return;
 
       const folder = `wsf-${threadId.replace(/_/g, '-')}`;
@@ -184,7 +198,7 @@ export class WsfChannel implements Channel {
       const resp = await fetch(`${this.serverUrl}/threads?status=open`);
       if (!resp.ok) return;
 
-      const threads: WsfThread[] = await resp.json() as WsfThread[];
+      const threads: WsfThread[] = (await resp.json()) as WsfThread[];
 
       for (const thread of threads) {
         if (this.claimedThreads.has(thread.id)) continue;
@@ -225,10 +239,12 @@ export class WsfChannel implements Channel {
 
   private async fetchAndDeliverMessages(threadId: string): Promise<void> {
     try {
-      const resp = await fetch(`${this.serverUrl}/threads/${threadId}/messages`);
+      const resp = await fetch(
+        `${this.serverUrl}/threads/${threadId}/messages`,
+      );
       if (!resp.ok) return;
 
-      const messages: WsfMessage[] = await resp.json() as WsfMessage[];
+      const messages: WsfMessage[] = (await resp.json()) as WsfMessage[];
       const jid = WsfChannel.threadJid(threadId);
 
       // Dynamically register this thread as a group so the message loop
@@ -237,7 +253,13 @@ export class WsfChannel implements Channel {
       // and repo mounts. The group-queue treats each JID independently.
       this.ensureThreadRegistered(jid);
 
-      this.onChatMetadata(jid, new Date().toISOString(), 'WSF Tasks', 'wsf', false);
+      this.onChatMetadata(
+        jid,
+        new Date().toISOString(),
+        'WSF Tasks',
+        'wsf',
+        false,
+      );
 
       for (const msg of messages) {
         if (msg.sender === this.botDid) continue;
@@ -288,14 +310,23 @@ export class WsfChannel implements Channel {
     // We copy instead of symlink because Docker bind-mounts don't resolve
     // host-path symlinks inside the container.
     const dataDir = path.resolve(GROUPS_DIR, '..', 'data');
-    const baseCreds = path.join(dataDir, 'sessions', 'wsf-tasks', '.claude', '.credentials.json');
+    const baseCreds = path.join(
+      dataDir,
+      'sessions',
+      'wsf-tasks',
+      '.claude',
+      '.credentials.json',
+    );
     const threadSessionDir = path.join(dataDir, 'sessions', folder, '.claude');
     const threadCreds = path.join(threadSessionDir, '.credentials.json');
     if (fs.existsSync(baseCreds) && !fs.existsSync(threadCreds)) {
       fs.mkdirSync(threadSessionDir, { recursive: true });
       fs.copyFileSync(baseCreds, threadCreds);
       logger.info(`[wsf] Copied credentials for ${folder}`);
-    } else if (fs.existsSync(baseCreds) && fs.lstatSync(threadCreds).isSymbolicLink()) {
+    } else if (
+      fs.existsSync(baseCreds) &&
+      fs.lstatSync(threadCreds).isSymbolicLink()
+    ) {
       // Replace stale symlink with a copy
       fs.unlinkSync(threadCreds);
       fs.copyFileSync(baseCreds, threadCreds);
@@ -303,9 +334,9 @@ export class WsfChannel implements Channel {
     }
 
     // Inherit containerConfig from the base wsf-tasks group (repo mounts, etc.)
-    const baseGroup = groups['wsf:default'] || Object.values(groups).find(
-      (g) => g.folder === 'wsf-tasks'
-    );
+    const baseGroup =
+      groups['wsf:default'] ||
+      Object.values(groups).find((g) => g.folder === 'wsf-tasks');
 
     this.registerGroup(jid, {
       name: 'WSF Tasks',
@@ -313,23 +344,29 @@ export class WsfChannel implements Channel {
       trigger: '',
       requiresTrigger: false,
       added_at: new Date().toISOString(),
-      ...(baseGroup?.containerConfig ? { containerConfig: baseGroup.containerConfig } : {}),
+      ...(baseGroup?.containerConfig
+        ? { containerConfig: baseGroup.containerConfig }
+        : {}),
     });
     logger.info(`[wsf] Registered thread group: ${jid} (folder: ${folder})`);
   }
 
   private deliverMessage(msg: WsfMessage): void {
     const jid = WsfChannel.threadJid(msg.threadId);
+    // Include details (full task spec) if present — body alone is just the summary
+    const content = msg.details ? `${msg.body}\n\n${msg.details}` : msg.body;
     const newMessage: NewMessage = {
       id: msg.id,
       chat_jid: jid,
       sender: msg.sender,
       sender_name: msg.sender.split(':').pop() || msg.sender,
-      content: msg.body,
+      content,
       timestamp: msg.createdAt,
       thread_id: msg.threadId,
     };
-    logger.info(`[wsf] Delivering message ${msg.id} to ${jid} (${msg.body.slice(0, 50)}...)`);
+    logger.info(
+      `[wsf] Delivering message ${msg.id} to ${jid} (${msg.body.slice(0, 50)}...)`,
+    );
     this.onMessage(jid, newMessage);
   }
 
@@ -348,7 +385,8 @@ export class WsfChannel implements Channel {
     let details: string | undefined;
 
     const firstNewline = text.indexOf('\n');
-    const firstLine = firstNewline > 0 ? text.slice(0, firstNewline).trim() : text.trim();
+    const firstLine =
+      firstNewline > 0 ? text.slice(0, firstNewline).trim() : text.trim();
 
     if (text.length <= MAX_SUMMARY) {
       summary = text;
@@ -376,7 +414,9 @@ export class WsfChannel implements Channel {
       throw new Error(`WSF POST failed (${resp.status}): ${body}`);
     }
 
-    logger.info(`[wsf] Reply posted to thread ${threadId} (summary: ${summary.length} chars, details: ${details ? details.length : 0} chars)`);
+    logger.info(
+      `[wsf] Reply posted to thread ${threadId} (summary: ${summary.length} chars, details: ${details ? details.length : 0} chars)`,
+    );
   }
 
   isConnected(): boolean {

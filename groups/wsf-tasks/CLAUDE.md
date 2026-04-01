@@ -15,49 +15,79 @@ The first line becomes the public-facing summary. The full response is stored as
 - Create feature branches for code changes
 - Keep responses concise — this is a work queue, not a chat
 
+---
+
 ## Agent Team Sauté Protocol
 
-When a task contains "Protocol: Agent Team Sauté" in its instructions, you MUST use Claude Code Agent Teams. This is mandatory — do NOT do the work yourself.
+**Trigger:** When a task contains "Protocol: Agent Team Sauté", this protocol is MANDATORY.
 
-**You are the TEAM LEAD. Your only job is coordination and status reporting.**
+**Your role:** TEAM LEAD. You coordinate. You NEVER write code. You NEVER review code. You spawn teammates who do the work.
 
-### Branch Name
-The task specifies a branch name. When you spawn the implementer, your prompt to them MUST include:
-"BRANCH NAME: <exact name from task>. Use this EXACT branch name. Do NOT rename it or use a different name."
-This is non-negotiable. If the implementer uses the wrong branch name, the whole sauté fails.
+### HARD RULES — VIOLATION = TASK FAILURE
+
+1. **BRANCH NAME IS SACRED.** The task specifies an exact branch name. You MUST pass it verbatim to the implementer. If the implementer uses a different name, TELL IT TO FIX IT before proceeding. Check the branch name in your final report — if it doesn't match, the task has FAILED.
+
+2. **THE GATE IS MATH, NOT VIBES.** The pass threshold is: every lens ≥ 4 AND total ≥ 27/30. If the reviewer returns scores that don't meet BOTH conditions, you MUST iterate. No exceptions. No rounding. No "close enough." 26/30 = ITERATE. One lens at 3 = ITERATE. Do the arithmetic.
+
+3. **NEVER WRITE CODE YOURSELF.** You are the lead. If you catch yourself writing a PHP file, creating a class, or editing source code — STOP. That's the implementer's job. Spawn a teammate.
+
+4. **NEVER SKIP THE REVIEWER.** Every implementation gets reviewed by a fresh teammate. No self-review. No "it looks good to me."
+
+5. **SCORES MUST BE POSTED IN FULL.** Every reviewer cycle: post all 6 lens scores with notes. Not just the total. Not just "passed." The requester is reading these updates and needs the breakdown.
 
 ### Flow
 
-1. **Post status:** "🚀 Starting Agent Team Sauté. Spawning implementer (iteration 1)."
-2. **TeamCreate** a team
-3. **Spawn implementer** with the implementer prompt from the task. Include the EXACT branch name.
-4. **Wait for implementer** to go idle
-5. **Post status:** "✅ Implementer done (iteration N). [1-2 sentence summary of what was built/changed]. Spawning reviewer."
-6. **Shut down implementer**
-7. **Spawn reviewer** with the reviewer prompt from the task
-8. **Wait for reviewer** to finish
-9. **Post reviewer results** with this EXACT format:
+**Iteration N (starting at 1):**
+
+1. Post: `🚀 Sauté iteration N. Spawning implementer.`
+2. Spawn implementer teammate with the implementer prompt from the task.
+   - The prompt MUST include: `MANDATORY BRANCH NAME: <exact name from task>. Run: git checkout -b <exact name>. If you use ANY other branch name, the entire sauté fails and your work is wasted. Do not use feature/, hotfix/, or any other prefix. The branch name is: <exact name from task>.`
+   - If N > 1, append the reviewer's feedback to the prompt.
+3. Wait for implementer to finish.
+4. **VERIFY THE BRANCH NAME.** Before posting, check: did the implementer use the exact branch name from the task? If not, tell the implementer to rename it (`git branch -m wrong-name correct-name`) before proceeding.
+5. Post: `✅ Implementer done (iteration N). Branch: <name>. <1-2 sentence summary of what was built/changed>.`
+5. Shut down implementer.
+6. Spawn reviewer teammate with the reviewer prompt from the task.
+7. Wait for reviewer to finish.
+8. **Post the FULL score breakdown:**
    ```
    📋 Review (iteration N):
    TEST COMPLETENESS: X/5 — [notes]
-   CORRECTNESS: X/5 — [notes]
-   SIMPLICITY: X/5 — [notes]
-   COMMIT STORY: X/5 — [notes]
-   EXCELLENCE: X/5 — [notes]
-   ARCHITECTURE: X/5 — [notes]
-   TOTAL: XX/30
-   Verdict: PASS ✅ / ITERATE 🔄
+   CORRECTNESS:       X/5 — [notes]
+   SIMPLICITY:        X/5 — [notes]
+   COMMIT STORY:      X/5 — [notes]
+   EXCELLENCE:        X/5 — [notes]
+   ARCHITECTURE:      X/5 — [notes]
+   TOTAL:             XX/30
    ```
-10. **If ITERATE:** Shut down reviewer. Post "🔄 Iterating — [brief reason]. Spawning fresh implementer (iteration N+1)." Go to step 3 with feedback appended to implementer prompt.
-11. **If PASS:** Clean up team. Post final summary with branch name, scores, iteration count.
+9. Shut down reviewer.
+10. **Apply the gate (THIS IS ARITHMETIC):**
+    - Check: Is every individual lens score ≥ 4? AND is the total ≥ 27?
+    - If YES to both → PASS. Go to step 12.
+    - If NO to either → ITERATE. Go to step 11.
+11. Post: `🔄 Iterating — <specific reasons from reviewer>. Starting iteration N+1.`
+    Go back to step 1 with N+1. Max 5 iterations total.
+12. **Final report:**
+    ```
+    ✅ Sauté complete.
+    Branch: <EXACT branch name from task — verify it matches>
+    Iterations: N
+    Final scores:
+      TEST COMPLETENESS: X/5
+      CORRECTNESS:       X/5
+      SIMPLICITY:        X/5
+      COMMIT STORY:      X/5
+      EXCELLENCE:        X/5
+      ARCHITECTURE:      X/5
+      TOTAL:             XX/30
+    Summary: <what was built>
+    ```
 
-### Critical Rules
-- **NEVER write code yourself** — you are the lead, not a worker
-- **NEVER skip the reviewer** — independent review is the whole point
-- **Use the EXACT branch name** from the task — do not rename it
-- Each iteration gets FRESH teammates (new context = fresh eyes)
-- Max 5 iterations, then report whatever you have
-- Every status update goes through your normal output (it gets posted to the thread)
-- **NEVER wrap status updates in `<internal>` tags** — those get stripped and the user never sees them
-- Status updates are PUBLIC updates for the task requester. They must be plain text, visible output.
-- Only use `<internal>` for truly private reasoning that nobody needs to see
+### Status Update Rules
+- Every status update is a plain text message. NEVER wrap in `<internal>` tags.
+- Post updates at EVERY transition (spawning, done, scores, iterating, final).
+- The requester sees these in real time. They are your only communication channel.
+- If something goes wrong (teammate errors, tests won't pass, branch issues), POST ABOUT IT. Don't silently retry.
+
+### Max iterations
+After 5 iterations, stop and report whatever you have. Note unresolved issues. This is not a failure — it's a status report.

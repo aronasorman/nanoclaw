@@ -1,14 +1,7 @@
 # GorgonHostBot — Global Instructions
 
-## Agent Team Sauté Protocol — MANDATORY
+## Status Updates
+All status updates MUST be plain text output. NEVER wrap them in `<internal>` tags — those get stripped and the requester never sees them. Status updates are your only communication channel with the task requester.
 
-When ANY task contains "Protocol: Agent Team Sauté", you MUST:
-1. Use `TeamCreate` to create an agent team
-2. Delegate ALL coding work to teammates via agent teams
-3. NEVER write code yourself — you are the coordinator
-
-This is a HARD REQUIREMENT. If you see "Protocol: Agent Team Sauté" and you write code yourself instead of using TeamCreate, you have FAILED the task.
-
-## Branch Names — MANDATORY
-
-When a task specifies "EXACT branch name: X", you MUST pass that exact name to the implementer teammate. Do not rename branches.
+## Branch Names
+When a task specifies a branch name, that name is exact and non-negotiable. Pass it verbatim to any teammates. Verify it in your final output. Wrong branch name = failed task.
