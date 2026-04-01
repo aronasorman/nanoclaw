@@ -110,9 +110,11 @@ const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 function writeOutput(output: ContainerOutput): void {
-  console.log(OUTPUT_START_MARKER);
-  console.log(JSON.stringify(output));
-  console.log(OUTPUT_END_MARKER);
+  const text = `${OUTPUT_START_MARKER}\n${JSON.stringify(output)}\n${OUTPUT_END_MARKER}\n`;
+  // Use write() instead of console.log() to avoid extra buffering.
+  // Pipe stdout in Docker can buffer aggressively; this ensures each
+  // output marker pair is pushed to the OS pipe promptly.
+  process.stdout.write(text);
 }
 
 function log(message: string): void {
