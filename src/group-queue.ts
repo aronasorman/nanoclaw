@@ -34,6 +34,12 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  private containerDoneCallbacks: ((groupJid: string) => void)[] = [];
+
+  /** Register a callback to be invoked when a container finishes for any group. */
+  onContainerDone(cb: (groupJid: string) => void): void {
+    this.containerDoneCallbacks.push(cb);
+  }
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -227,6 +233,7 @@ export class GroupQueue {
       state.containerName = null;
       state.groupFolder = null;
       this.activeCount--;
+      for (const cb of this.containerDoneCallbacks) cb(groupJid);
       this.drainGroup(groupJid);
     }
   }
@@ -256,6 +263,7 @@ export class GroupQueue {
       state.containerName = null;
       state.groupFolder = null;
       this.activeCount--;
+      for (const cb of this.containerDoneCallbacks) cb(groupJid);
       this.drainGroup(groupJid);
     }
   }

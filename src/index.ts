@@ -1,3 +1,4 @@
+import http from 'http';
 import fs from 'fs';
 import path from 'path';
 
@@ -265,6 +266,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   // Track idle timer for closing stdin when agent is idle
+  // WSF tasks (non-interactive) get a shorter timeout since the agent
+  // finishes its work and goes idle — no human input to wait for.
+  const isWsfGroup = chatJid.startsWith('wsf:');
+  const idleTimeout = isWsfGroup ? 600_000 : IDLE_TIMEOUT; // 10 min for WSF (agent teams need time), 30 min for chat
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
@@ -275,7 +280,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Idle timeout, closing container stdin',
       );
       queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    }, idleTimeout);
   };
 
   await channel.setTyping?.(chatJid, true);
@@ -410,7 +415,9 @@ async function runAgent(
       const isStaleSession =
         sessionId &&
         output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(output.error);
+        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
+          output.error,
+        );
 
       if (isStaleSession) {
         logger.warn(
@@ -632,7 +639,8 @@ async function main(): Promise<void> {
   }
 
   // Channel callbacks (shared by all channels)
-  const channelOpts = {
+  const channelOpts: import('./channels/registry.js').ChannelOpts = {
+    registerGroup,
     onMessage: (chatJid: string, msg: NewMessage) => {
       // Remote control commands — intercept before storage
       const trimmed = msg.content.trim();
@@ -692,6 +700,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Wire up WSF channel's clearActiveThread to group-queue container-done events.
+  // Each WSF thread has its own JID (wsf:t_xxx), so pass the JID through.
+  const wsfChannel = channels.find((c) => c.ownsJid('wsf:default'));
+  if (wsfChannel && 'clearActiveThread' in wsfChannel) {
+    queue.onContainerDone((groupJid) => {
+      if (groupJid.startsWith('wsf:')) {
+        (
+          wsfChannel as { clearActiveThread: (jid: string) => void }
+        ).clearActiveThread(groupJid);
+      }
+    });
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -744,6 +765,79 @@ async function main(): Promise<void> {
       }
     },
   });
+  // HTTP API for external message injection (bot-to-bot communication).
+  // Telegram bots can't see messages from other bots, so AronBot posts to
+  // Telegram for visibility and POSTs here for processing.
+  const API_PORT = parseInt(process.env.NANOCLAW_API_PORT || '9990', 10);
+  const API_TOKEN = process.env.NANOCLAW_API_TOKEN || '';
+
+  const apiServer = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/api/message') {
+      // Auth check
+      if (API_TOKEN) {
+        const authHeader = req.headers.authorization || '';
+        if (authHeader !== `Bearer ${API_TOKEN}`) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'unauthorized' }));
+          return;
+        }
+      }
+
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const { chatJid, sender, senderName, content } = data;
+          if (!chatJid || !content) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'chatJid and content required' }));
+            return;
+          }
+          const msgId = `api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const timestamp = new Date().toISOString();
+          const msg: NewMessage = {
+            id: msgId,
+            chat_jid: chatJid,
+            sender: sender || 'api',
+            sender_name: senderName || 'API',
+            content,
+            timestamp,
+            is_from_me: false,
+          };
+          // Store and process like any inbound message
+          storeMessage(msg);
+          logger.info(
+            { chatJid, sender: msg.sender_name, len: content.length },
+            'API message injected',
+          );
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, id: msgId }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid JSON' }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          groups: Object.keys(registeredGroups).length,
+        }),
+      );
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    }
+  });
+
+  apiServer.listen(API_PORT, '127.0.0.1', () => {
+    logger.info({ port: API_PORT }, 'HTTP API listening (localhost only)');
+  });
+
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
