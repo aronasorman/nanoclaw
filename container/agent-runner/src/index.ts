@@ -439,6 +439,27 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+
+      // Emit assistant text as intermediate status updates.
+      // Agent Teams leads post status updates as assistant messages between
+      // tool calls — these need to reach the channel for WIP visibility.
+      const assistantMsg = message as { message?: { content?: Array<{ type: string; text?: string }> } };
+      const textBlocks = assistantMsg.message?.content?.filter(
+        (b) => b.type === 'text' && b.text?.trim()
+      );
+      if (textBlocks && textBlocks.length > 0) {
+        const text = textBlocks.map((b) => b.text!.trim()).join('\n');
+        // Only emit status-like messages (emoji-prefixed or score-like)
+        // to avoid flooding with internal reasoning
+        if (/^[🚀✅📋🔄❌⚠️]/.test(text) || /TOTAL:\s+\d+\/\d+/.test(text)) {
+          log(`Status update: ${text.slice(0, 100)}`);
+          writeOutput({
+            status: 'success',
+            result: text,
+            newSessionId,
+          });
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
