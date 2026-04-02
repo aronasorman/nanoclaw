@@ -20,13 +20,17 @@ import { logger } from '../logger.js';
 import { readEnvFile } from '../env.js';
 import { GROUPS_DIR } from '../config.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { Channel, NewMessage } from '../types.js';
+import { Channel, ContainerConfig, NewMessage } from '../types.js';
 
 const WSF_JID_PREFIX = 'wsf:';
 const LEGACY_JID = 'wsf:default';
 const POLL_INTERVAL_MS = 15_000;
 const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 30_000;
+
+const WIKI_VAULT_PATH =
+  process.env.WIKI_VAULT_PATH || '/home/aron/vaults/02-AGENTS';
+const ROLES_DIR = path.join(WIKI_VAULT_PATH, '_global', 'roles');
 
 interface WsfThread {
   id: string;
@@ -36,6 +40,7 @@ interface WsfThread {
   status: string;
   budget: number;
   createdAt: string;
+  role?: string;
 }
 
 interface WsfMessage {
@@ -113,7 +118,7 @@ export class WsfChannel implements Channel {
       this.reconnectDelay = WS_RECONNECT_BASE_MS;
     });
 
-    this.ws.on('message', (data: WebSocket.Data) => {
+    this.ws.on('message', async (data: WebSocket.Data) => {
       try {
         const envelope = JSON.parse(data.toString());
         // WSF server sends {type, threadId, message: {...}}
@@ -127,7 +132,7 @@ export class WsfChannel implements Channel {
         // is registered so the message loop can pick it up.
         if (msg.threadId) {
           const jid = WsfChannel.threadJid(msg.threadId);
-          this.ensureThreadRegistered(jid);
+          await this.ensureThreadRegistered(jid);
         }
 
         logger.info(
@@ -248,10 +253,10 @@ export class WsfChannel implements Channel {
       const jid = WsfChannel.threadJid(threadId);
 
       // Dynamically register this thread as a group so the message loop
-      // and container-runner know how to handle it. All WSF threads share
-      // the same folder ('wsf-tasks') so they get the same CLAUDE.md, skills,
-      // and repo mounts. The group-queue treats each JID independently.
-      this.ensureThreadRegistered(jid);
+      // and container-runner know how to handle it. The group-queue treats
+      // each JID independently. Role-based threads get their own CLAUDE.md
+      // via claudeMdSource; others share the wsf-tasks CLAUDE.md copy.
+      await this.ensureThreadRegistered(jid);
 
       this.onChatMetadata(
         jid,
@@ -274,10 +279,14 @@ export class WsfChannel implements Channel {
 
   /**
    * Register a WSF thread as a group if not already registered.
-   * Each thread gets its own folder (wsf-t-XXXX) for session/IPC isolation,
-   * but symlinks CLAUDE.md from the shared wsf-tasks folder.
+   * Each thread gets its own folder (wsf-t-XXXX) for session/IPC isolation.
+   *
+   * If the thread has a `role` field and a matching role file exists at
+   * /home/aron/vaults/02-AGENTS/_global/roles/{role}.md, sets claudeMdSource
+   * to that path (container-runner.ts bind-mounts it as CLAUDE.md).
+   * Otherwise falls back to copying CLAUDE.md from the base wsf-tasks folder.
    */
-  private ensureThreadRegistered(jid: string): void {
+  async ensureThreadRegistered(jid: string): Promise<void> {
     const groups = this.registeredGroups();
     if (groups[jid]) return;
     if (!this.registerGroup) {
@@ -288,21 +297,51 @@ export class WsfChannel implements Channel {
     const threadId = WsfChannel.threadIdFromJid(jid);
     if (!threadId) return;
 
+    // Fetch thread metadata to check for a role
+    let role: string | undefined;
+    try {
+      const resp = await fetch(`${this.serverUrl}/threads/${threadId}`);
+      if (resp.ok) {
+        const thread: WsfThread = (await resp.json()) as WsfThread;
+        role = thread.role || undefined;
+      }
+    } catch (err) {
+      logger.warn(`[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`);
+    }
+
+    // Resolve role file if specified
+    let roleFilePath: string | undefined;
+    if (role) {
+      const candidate = path.join(ROLES_DIR, `${role}.md`);
+      if (fs.existsSync(candidate)) {
+        roleFilePath = candidate;
+        logger.info(`[wsf] Thread ${threadId} has role '${role}', using ${candidate}`);
+      } else {
+        logger.warn(
+          `[wsf] Thread ${threadId} has role '${role}' but ${candidate} not found, falling back to default CLAUDE.md`,
+        );
+      }
+    }
+
     // Folder name: wsf-t-XXXX (underscores in thread IDs replaced with hyphens)
     const folder = `wsf-${threadId.replace(/_/g, '-')}`;
 
-    // Ensure the thread's group folder exists with a symlinked CLAUDE.md
+    // Ensure the thread's group folder and logs dir exist
     const threadDir = path.join(GROUPS_DIR, folder);
-    const baseDir = path.join(GROUPS_DIR, 'wsf-tasks');
-    const baseClaude = path.join(baseDir, 'CLAUDE.md');
-    const threadClaude = path.join(threadDir, 'CLAUDE.md');
-
     fs.mkdirSync(path.join(threadDir, 'logs'), { recursive: true });
 
-    if (fs.existsSync(baseClaude) && !fs.existsSync(threadClaude)) {
-      // Copy (not symlink) — Docker bind-mounts don't resolve host-path symlinks
-      fs.copyFileSync(baseClaude, threadClaude);
-      logger.info(`[wsf] Copied CLAUDE.md for ${folder}`);
+    // Only copy CLAUDE.md from wsf-tasks when no role-based claudeMdSource is set
+    // (the bind mount in container-runner.ts handles it when claudeMdSource is set)
+    if (!roleFilePath) {
+      const baseDir = path.join(GROUPS_DIR, 'wsf-tasks');
+      const baseClaude = path.join(baseDir, 'CLAUDE.md');
+      const threadClaude = path.join(threadDir, 'CLAUDE.md');
+
+      if (fs.existsSync(baseClaude) && !fs.existsSync(threadClaude)) {
+        // Copy (not symlink) — Docker bind-mounts don't resolve host-path symlinks
+        fs.copyFileSync(baseClaude, threadClaude);
+        logger.info(`[wsf] Copied CLAUDE.md for ${folder}`);
+      }
     }
 
     // Copy Claude credentials so the container can authenticate.
@@ -338,14 +377,33 @@ export class WsfChannel implements Channel {
       groups['wsf:default'] ||
       Object.values(groups).find((g) => g.folder === 'wsf-tasks');
 
+    const baseConfig: ContainerConfig = baseGroup?.containerConfig
+      ? { ...baseGroup.containerConfig }
+      : {};
+
+    // When a role is specified, set claudeMdSource and add wiki vault mount
+    if (roleFilePath) {
+      baseConfig.claudeMdSource = roleFilePath;
+
+      const wikiMount = {
+        hostPath: WIKI_VAULT_PATH,
+        containerPath: 'wiki',
+        readonly: true,
+      };
+      baseConfig.additionalMounts = [
+        ...(baseConfig.additionalMounts || []),
+        wikiMount,
+      ];
+    }
+
     this.registerGroup(jid, {
       name: 'WSF Tasks',
       folder,
       trigger: '',
       requiresTrigger: false,
       added_at: new Date().toISOString(),
-      ...(baseGroup?.containerConfig
-        ? { containerConfig: baseGroup.containerConfig }
+      ...(Object.keys(baseConfig).length > 0
+        ? { containerConfig: baseConfig }
         : {}),
     });
     logger.info(`[wsf] Registered thread group: ${jid} (folder: ${folder})`);
