@@ -30,6 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  claudeMdSource?: string; // Absolute host path to a file that overrides the group's CLAUDE.md via bind mount
 }
 
 export interface RegisteredGroup {

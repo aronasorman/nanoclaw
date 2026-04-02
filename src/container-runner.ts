@@ -220,6 +220,32 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // Override CLAUDE.md with a specific file from the host (e.g. wiki role file).
+  // This bind-mounts the source file directly over /workspace/group/CLAUDE.md,
+  // so the agent always reads the latest version without copies.
+  if (group.containerConfig?.claudeMdSource) {
+    const expandedPath = group.containerConfig.claudeMdSource.replace(
+      /^~/,
+      process.env.HOME || '',
+    );
+    if (fs.existsSync(expandedPath)) {
+      mounts.push({
+        hostPath: path.resolve(expandedPath),
+        containerPath: '/workspace/group/CLAUDE.md',
+        readonly: true,
+      });
+      logger.info(
+        { group: group.name, source: expandedPath },
+        'CLAUDE.md overridden via claudeMdSource bind mount',
+      );
+    } else {
+      logger.warn(
+        { group: group.name, source: expandedPath },
+        'claudeMdSource file not found, using default CLAUDE.md',
+      );
+    }
+  }
+
   return mounts;
 }
 
