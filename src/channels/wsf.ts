@@ -117,7 +117,10 @@ export class WsfChannel implements Channel {
 
   static availableRoles(): Set<string> {
     const now = Date.now();
-    if (WsfChannel._roleCache && now - WsfChannel._roleCacheTime < WsfChannel.ROLE_CACHE_TTL_MS) {
+    if (
+      WsfChannel._roleCache &&
+      now - WsfChannel._roleCacheTime < WsfChannel.ROLE_CACHE_TTL_MS
+    ) {
       return WsfChannel._roleCache;
     }
     const roles = new Set<string>();
@@ -344,7 +347,11 @@ export class WsfChannel implements Channel {
   private copyCredentials(folder: string): void {
     const dataDir = path.resolve(GROUPS_DIR, '..', 'data');
     const baseCreds = path.join(
-      dataDir, 'sessions', 'wsf-tasks', '.claude', '.credentials.json',
+      dataDir,
+      'sessions',
+      'wsf-tasks',
+      '.claude',
+      '.credentials.json',
     );
     const sessionDir = path.join(dataDir, 'sessions', folder, '.claude');
     const creds = path.join(sessionDir, '.credentials.json');
@@ -392,7 +399,9 @@ export class WsfChannel implements Channel {
         role = thread.role || undefined;
       }
     } catch (err) {
-      logger.warn(`[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`);
+      logger.warn(
+        `[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`,
+      );
     }
 
     // Resolve role file if specified
@@ -401,7 +410,9 @@ export class WsfChannel implements Channel {
       const candidate = path.join(ROLES_DIR, `${role}.md`);
       if (fs.existsSync(candidate)) {
         roleFilePath = candidate;
-        logger.info(`[wsf] Thread ${threadId} has role '${role}', using ${candidate}`);
+        logger.info(
+          `[wsf] Thread ${threadId} has role '${role}', using ${candidate}`,
+        );
       } else {
         logger.warn(
           `[wsf] Thread ${threadId} has role '${role}' but ${candidate} not found, falling back to default CLAUDE.md`,
@@ -472,12 +483,17 @@ export class WsfChannel implements Channel {
    * Register a role-specific group JID (wsf:t_xxx:role) for @mention routing.
    * Each role gets its own folder and claudeMdSource pointing to the role file.
    */
-  private async ensureRoleRegistered(threadId: string, role: string): Promise<void> {
+  private async ensureRoleRegistered(
+    threadId: string,
+    role: string,
+  ): Promise<void> {
     const jid = WsfChannel.roleJid(threadId, role);
     const groups = this.registeredGroups();
     if (groups[jid]) return;
     if (!this.registerGroup) {
-      logger.warn(`[wsf] registerGroup not available, cannot register role ${jid}`);
+      logger.warn(
+        `[wsf] registerGroup not available, cannot register role ${jid}`,
+      );
       return;
     }
 

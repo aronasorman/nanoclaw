@@ -10,7 +10,10 @@ vi.mock('../logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 vi.mock('ws', () => ({
-  default: class MockWs { on() {} close() {} },
+  default: class MockWs {
+    on() {}
+    close() {}
+  },
 }));
 
 // Mock fs module
@@ -121,7 +124,11 @@ describe('WsfChannel.ensureThreadRegistered', () => {
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: threadId, role: 'nonexistent-role', status: 'open' }),
+      json: async () => ({
+        id: threadId,
+        role: 'nonexistent-role',
+        status: 'open',
+      }),
     });
 
     // Role file doesn't exist, but base CLAUDE.md does
@@ -180,11 +187,15 @@ describe('WsfChannel.ensureThreadRegistered', () => {
 
 describe('WsfChannel static helpers', () => {
   it('roleJid builds role-specific JID', () => {
-    expect(WsfChannel.roleJid('t_abc', 'architect')).toBe('wsf:t_abc:architect');
+    expect(WsfChannel.roleJid('t_abc', 'architect')).toBe(
+      'wsf:t_abc:architect',
+    );
   });
 
   it('parseRoleFromJid extracts role from role JID', () => {
-    expect(WsfChannel.parseRoleFromJid('wsf:t_abc:architect')).toBe('architect');
+    expect(WsfChannel.parseRoleFromJid('wsf:t_abc:architect')).toBe(
+      'architect',
+    );
   });
 
   it('parseRoleFromJid returns undefined for base JID', () => {
@@ -207,7 +218,9 @@ describe('WsfChannel static helpers', () => {
     // Invalidate role cache before each parseMentions test
     (WsfChannel as any)._roleCache = null;
     readdirSyncMock.mockReturnValue(['architect.md', 'designer.md']);
-    const result = WsfChannel.parseMentions('Hey @architect please review @unknown');
+    const result = WsfChannel.parseMentions(
+      'Hey @architect please review @unknown',
+    );
     expect(result).toEqual(['architect']);
   });
 
@@ -240,7 +253,9 @@ describe('WsfChannel @mention routing (deliverMessage)', () => {
     (WsfChannel as any)._roleCache = null;
     readdirSyncMock.mockReturnValue(['architect.md']);
     const architectPath = path.join(ROLES_DIR, 'architect.md');
-    existsSyncMock.mockImplementation((p: unknown) => String(p) === architectPath);
+    existsSyncMock.mockImplementation(
+      (p: unknown) => String(p) === architectPath,
+    );
 
     // Mock thread metadata fetch for ensureThreadRegistered
     mockFetch.mockResolvedValue({
@@ -405,7 +420,9 @@ describe('WsfChannel.ensureRoleRegistered', () => {
   it('skips already-registered role JIDs', async () => {
     const roleJid = 'wsf:t_abc:architect';
     opts = createOpts({
-      registeredGroups: vi.fn(() => ({ [roleJid]: { folder: 'existing' } as any })),
+      registeredGroups: vi.fn(() => ({
+        [roleJid]: { folder: 'existing' } as any,
+      })),
     });
     channel = new WsfChannel('http://localhost:8085', 'did:test:bot', opts);
 
