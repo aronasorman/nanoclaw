@@ -31,6 +31,50 @@ const WS_RECONNECT_MAX_MS = 30_000;
 const WIKI_VAULT_PATH =
   process.env.WIKI_VAULT_PATH || '/home/aron/vaults/02-AGENTS';
 const ROLES_DIR = path.join(WIKI_VAULT_PATH, '_global', 'roles');
+const ROLES_CONFIG_PATH = path.join(ROLES_DIR, 'config.yml.md');
+
+/** Provider env var presets. Keys match the `provider` field in config.yml.md. */
+const PROVIDER_ENV: Record<string, Record<string, string>> = {
+  zai: {
+    ANTHROPIC_AUTH_TOKEN: process.env.ZAI_API_KEY || '',
+    ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+    API_TIMEOUT_MS: '3000000',
+  },
+  // 'anthropic' is the default — no overrides needed
+};
+
+/**
+ * Parse the fenced YAML block from config.yml.md and return a role→provider map.
+ * Falls back to empty map on any error (all roles default to anthropic).
+ */
+function loadRoleProviders(): Record<string, string> {
+  try {
+    if (!fs.existsSync(ROLES_CONFIG_PATH)) return {};
+    const raw = fs.readFileSync(ROLES_CONFIG_PATH, 'utf-8');
+    // Extract content between ```yaml and ```
+    const match = raw.match(/```yaml\n([\s\S]*?)\n```/);
+    if (!match) return {};
+    const yaml = match[1];
+    const result: Record<string, string> = {};
+    // Simple YAML parser — handles our flat structure
+    let currentRole = '';
+    for (const line of yaml.split('\n')) {
+      const roleMatch = line.match(/^  (\w+):$/);
+      if (roleMatch) {
+        currentRole = roleMatch[1];
+        continue;
+      }
+      const providerMatch = line.match(/^    provider:\s*(\w+)/);
+      if (providerMatch && currentRole) {
+        result[currentRole] = providerMatch[1];
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.warn('[wsf] Failed to load role provider config', String(err));
+    return {};
+  }
+}
 
 interface WsfThread {
   id: string;
@@ -523,6 +567,15 @@ export class WsfChannel implements Channel {
         ...existing,
         { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: true },
       ];
+    }
+
+    // Inject provider-specific env vars (e.g., Z.AI for implementer)
+    const roleProviders = loadRoleProviders();
+    const provider = roleProviders[role] || 'anthropic';
+    const providerEnv = PROVIDER_ENV[provider];
+    if (providerEnv) {
+      baseConfig.envOverrides = { ...(baseConfig.envOverrides || {}), ...providerEnv };
+      logger.info(`[wsf] Role ${role} using provider: ${provider}`);
     }
 
     this.registerGroup(jid, {
