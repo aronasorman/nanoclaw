@@ -119,6 +119,8 @@ export class WsfChannel implements Channel {
   private seenMessages = new Set<string>();
   // Active threads: threadId → true. Cleared when container finishes.
   private activeThreads = new Set<string>();
+  // Role JIDs that have received their initial thread history injection.
+  private historyInjected = new Set<string>();
 
   constructor(serverUrl: string, botDid: string, opts: ChannelOpts) {
     this.serverUrl = serverUrl.replace(/\/$/, '');
@@ -596,6 +598,46 @@ export class WsfChannel implements Channel {
     logger.info(`[wsf] Registered role group: ${jid} (folder: ${folder})`);
   }
 
+  /**
+   * Fetch all messages in a thread from the Go server and format them
+   * as a conversation transcript for context injection.
+   */
+  private async fetchThreadHistory(
+    threadId: string,
+    excludeMessageId?: string,
+  ): Promise<string | null> {
+    try {
+      const resp = await fetch(
+        `${this.serverUrl}/threads/${threadId}/messages`,
+      );
+      if (!resp.ok) {
+        logger.warn(
+          `[wsf] Failed to fetch thread history: ${resp.status}`,
+        );
+        return null;
+      }
+      const messages: WsfMessage[] = (await resp.json()) as WsfMessage[];
+      // Filter out the current message to avoid duplication
+      const history = messages.filter((m) => m.id !== excludeMessageId);
+      if (history.length === 0) return null;
+
+      const lines = history.map((m) => {
+        const sender = m.sender.split(':').pop() || m.sender;
+        const body = m.details ? `${m.body}\n\n${m.details}` : m.body;
+        return `[${sender}]: ${body}`;
+      });
+
+      return (
+        '--- Thread History ---\n' +
+        lines.join('\n\n') +
+        '\n--- End Thread History ---'
+      );
+    } catch (err) {
+      logger.warn(`[wsf] Error fetching thread history: ${String(err)}`);
+      return null;
+    }
+  }
+
   private async deliverMessage(msg: WsfMessage): Promise<void> {
     // Skip self-delivery: bot's own replies flow back via WebSocket
     if (msg.sender === this.botDid) return;
@@ -604,29 +646,62 @@ export class WsfChannel implements Channel {
     // Include details (full task spec) if present — body alone is just the summary
     const content = msg.details ? `${msg.body}\n\n${msg.details}` : msg.body;
 
-    const buildMessage = (targetJid: string): NewMessage => ({
+    const buildMessage = (
+      targetJid: string,
+      contentOverride?: string,
+    ): NewMessage => ({
       id: msg.id,
       chat_jid: targetJid,
       sender: msg.sender,
       sender_name: msg.sender.split(':').pop() || msg.sender,
-      content,
+      content: contentOverride ?? content,
       timestamp: msg.createdAt,
       thread_id: msg.threadId,
     });
 
     // Always deliver to the base thread JID (PM sees everything)
-    logger.info(
-      `[wsf] Delivering message ${msg.id} to ${jid} (${msg.body.slice(0, 50)}...)`,
-    );
-    this.onMessage(jid, buildMessage(jid));
+    // PM gets history injection on first message too
+    if (!this.historyInjected.has(jid)) {
+      this.historyInjected.add(jid);
+      const history = await this.fetchThreadHistory(msg.threadId, msg.id);
+      if (history) {
+        const enriched = `${history}\n\n${content}`;
+        logger.info(
+          `[wsf] Delivering message ${msg.id} to ${jid} with thread history`,
+        );
+        this.onMessage(jid, buildMessage(jid, enriched));
+      } else {
+        logger.info(
+          `[wsf] Delivering message ${msg.id} to ${jid} (no prior history)`,
+        );
+        this.onMessage(jid, buildMessage(jid));
+      }
+    } else {
+      logger.info(
+        `[wsf] Delivering message ${msg.id} to ${jid}`,
+      );
+      this.onMessage(jid, buildMessage(jid));
+    }
 
     // Parse @mentions and route to role-specific containers
     const roles = WsfChannel.parseMentions(msg.body);
     for (const role of roles) {
       const roleJid = WsfChannel.roleJid(msg.threadId, role);
       await this.ensureRoleRegistered(msg.threadId, role);
-      logger.info(`[wsf] Routing @${role} mention to ${roleJid}`);
-      this.onMessage(roleJid, buildMessage(roleJid));
+
+      // Inject thread history on first message to a role container
+      if (!this.historyInjected.has(roleJid)) {
+        this.historyInjected.add(roleJid);
+        const history = await this.fetchThreadHistory(msg.threadId, msg.id);
+        const enriched = history ? `${history}\n\n${content}` : content;
+        logger.info(
+          `[wsf] Routing @${role} mention to ${roleJid} with thread history`,
+        );
+        this.onMessage(roleJid, buildMessage(roleJid, enriched));
+      } else {
+        logger.info(`[wsf] Routing @${role} mention to ${roleJid}`);
+        this.onMessage(roleJid, buildMessage(roleJid));
+      }
     }
   }
 
