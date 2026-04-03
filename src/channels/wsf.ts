@@ -39,6 +39,10 @@ const PROVIDER_ENV: Record<string, Record<string, string>> = {
     ANTHROPIC_AUTH_TOKEN: process.env.ZAI_API_KEY || '',
     ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
     API_TIMEOUT_MS: '3000000',
+    // Route all Claude model aliases to GLM-5-Turbo
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5-turbo',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5-turbo',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5-turbo',
   },
   // 'anthropic' is the default — no overrides needed
 };
@@ -574,7 +578,10 @@ export class WsfChannel implements Channel {
     const provider = roleProviders[role] || 'anthropic';
     const providerEnv = PROVIDER_ENV[provider];
     if (providerEnv) {
-      baseConfig.envOverrides = { ...(baseConfig.envOverrides || {}), ...providerEnv };
+      baseConfig.envOverrides = {
+        ...(baseConfig.envOverrides || {}),
+        ...providerEnv,
+      };
       logger.info(`[wsf] Role ${role} using provider: ${provider}`);
     }
 

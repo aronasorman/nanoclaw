@@ -138,7 +138,10 @@ function buildVolumeMounts(
       // https://code.claude.com/docs/en/memory#manage-auto-memory
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
     };
-    const mergedEnv = { ...baseEnv, ...(group.containerConfig?.envOverrides || {}) };
+    const mergedEnv = {
+      ...baseEnv,
+      ...(group.containerConfig?.envOverrides || {}),
+    };
     // Always rewrite settings.json so env overrides stay current
     fs.writeFileSync(
       settingsFile,
