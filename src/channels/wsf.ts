@@ -47,11 +47,26 @@ const PROVIDER_ENV: Record<string, Record<string, string>> = {
   // 'anthropic' is the default — no overrides needed
 };
 
+/** Per-role configuration parsed from config.yml.md */
+interface RoleConfig {
+  provider: string; // e.g. 'anthropic', 'zai'
+  target: string; // e.g. '', 'host', 'machine:quiet4'
+}
+
 /**
- * Parse the fenced YAML block from config.yml.md and return a role→provider map.
- * Falls back to empty map on any error (all roles default to anthropic).
+ * Machine identity for this NanoClaw instance.
+ * Used to filter execution targets: if a role's target is 'machine:X' and
+ * X doesn't match this machine, the role is skipped (left for another instance).
+ * Empty target means any machine can grab it.
+ * 'host' means only the machine where the WSF Go server runs (i.e. this one).
  */
-function loadRoleProviders(): Record<string, string> {
+const MACHINE_NAME = process.env.NANOCLAW_MACHINE_NAME || 'host';
+
+/**
+ * Parse the fenced YAML block from config.yml.md and return a role→config map.
+ * Falls back to empty map on any error (all roles default to anthropic, target: any).
+ */
+function loadRoleConfig(): Record<string, RoleConfig> {
   try {
     if (!fs.existsSync(ROLES_CONFIG_PATH)) return {};
     const raw = fs.readFileSync(ROLES_CONFIG_PATH, 'utf-8');
@@ -59,25 +74,64 @@ function loadRoleProviders(): Record<string, string> {
     const match = raw.match(/```yaml\n([\s\S]*?)\n```/);
     if (!match) return {};
     const yaml = match[1];
-    const result: Record<string, string> = {};
+    const result: Record<string, RoleConfig> = {};
     // Simple YAML parser — handles our flat structure
     let currentRole = '';
     for (const line of yaml.split('\n')) {
       const roleMatch = line.match(/^  (\w+):$/);
       if (roleMatch) {
         currentRole = roleMatch[1];
+        result[currentRole] = { provider: 'anthropic', target: '' };
         continue;
       }
+      if (!currentRole) continue;
       const providerMatch = line.match(/^    provider:\s*(\w+)/);
-      if (providerMatch && currentRole) {
-        result[currentRole] = providerMatch[1];
+      if (providerMatch) {
+        result[currentRole].provider = providerMatch[1];
+      }
+      const targetMatch = line.match(/^    target:\s*(\S+)/);
+      if (targetMatch) {
+        result[currentRole].target = targetMatch[1];
       }
     }
     return result;
   } catch (err) {
-    logger.warn('[wsf] Failed to load role provider config', String(err));
+    logger.warn('[wsf] Failed to load role config', String(err));
     return {};
   }
+}
+
+/** Backward-compat wrapper — returns role→provider map */
+function loadRoleProviders(): Record<string, string> {
+  const config = loadRoleConfig();
+  const result: Record<string, string> = {};
+  for (const [role, cfg] of Object.entries(config)) {
+    result[role] = cfg.provider;
+  }
+  return result;
+}
+
+/**
+ * Check if this machine should execute a role based on its target config.
+ * Returns true if the role should run here, false if it should be skipped.
+ *
+ * Rules:
+ * - Empty target ("") → any machine can grab it → true
+ * - "host" → only on the host machine (MACHINE_NAME === 'host') → true if match
+ * - "machine:X" → only on machine X → true if MACHINE_NAME === X
+ */
+function shouldExecuteRole(role: string): boolean {
+  const config = loadRoleConfig();
+  const roleTarget = config[role]?.target || '';
+  if (roleTarget === '') return true; // any machine
+  if (roleTarget === 'host') return MACHINE_NAME === 'host';
+  const machineMatch = roleTarget.match(/^machine:(.+)$/);
+  if (machineMatch) return MACHINE_NAME === machineMatch[1];
+  // Unknown target format — log and skip
+  logger.warn(
+    `[wsf] Unknown target format '${roleTarget}' for role '${role}', skipping`,
+  );
+  return false;
 }
 
 interface WsfThread {
@@ -89,6 +143,7 @@ interface WsfThread {
   budget: number;
   createdAt: string;
   role?: string;
+  target?: string; // execution target: '', 'host', 'machine:{name}'
 }
 
 interface WsfMessage {
@@ -440,18 +495,34 @@ export class WsfChannel implements Channel {
     const threadId = WsfChannel.threadIdFromJid(jid);
     if (!threadId) return;
 
-    // Fetch thread metadata to check for a role
+    // Fetch thread metadata to check for a role and execution target
     let role: string | undefined;
+    let threadTarget: string | undefined;
     try {
       const resp = await fetch(`${this.serverUrl}/threads/${threadId}`);
       if (resp.ok) {
         const thread: WsfThread = (await resp.json()) as WsfThread;
         role = thread.role || undefined;
+        threadTarget = thread.target || undefined;
       }
     } catch (err) {
       logger.warn(
         `[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`,
       );
+    }
+
+    // Check thread-level execution target
+    if (threadTarget) {
+      const isHost =
+        threadTarget === 'host' && MACHINE_NAME === 'host';
+      const machineMatch = threadTarget.match(/^machine:(.+)$/);
+      const isMachine = machineMatch && MACHINE_NAME === machineMatch[1];
+      if (!isHost && !isMachine && threadTarget !== '') {
+        logger.info(
+          `[wsf] Skipping thread ${threadId} — target '${threadTarget}' doesn't match this machine '${MACHINE_NAME}'`,
+        );
+        return;
+      }
     }
 
     // Resolve role file if specified
@@ -573,7 +644,11 @@ export class WsfChannel implements Channel {
       const wikiReadonly = role !== 'scribe';
       baseConfig.additionalMounts = [
         ...existing,
-        { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: wikiReadonly },
+        {
+          hostPath: WIKI_VAULT_PATH,
+          containerPath: 'wiki',
+          readonly: wikiReadonly,
+        },
       ];
     }
 
@@ -684,6 +759,13 @@ export class WsfChannel implements Channel {
     // Parse @mentions and route to role-specific containers
     const roles = WsfChannel.parseMentions(msg.body);
     for (const role of roles) {
+      // Check execution target — skip if this machine shouldn't run this role
+      if (!shouldExecuteRole(role)) {
+        logger.info(
+          `[wsf] Skipping @${role} — target mismatch (this=${MACHINE_NAME})`,
+        );
+        continue;
+      }
       const roleJid = WsfChannel.roleJid(msg.threadId, role);
       await this.ensureRoleRegistered(msg.threadId, role);
 
@@ -703,11 +785,12 @@ export class WsfChannel implements Channel {
     }
 
     // Scribe receives ALL messages as passive observer (like PM/base JID).
-    // Only activate if scribe role file exists.
+    // Only activate if scribe role file exists and target matches.
     const scribeRoleFile = path.join(ROLES_DIR, 'scribe.md');
     if (
       fs.existsSync(scribeRoleFile) &&
-      !roles.includes('scribe') // avoid double-delivery if explicitly @mentioned
+      !roles.includes('scribe') && // avoid double-delivery if explicitly @mentioned
+      shouldExecuteRole('scribe')
     ) {
       const scribeJid = WsfChannel.roleJid(msg.threadId, 'scribe');
       await this.ensureRoleRegistered(msg.threadId, 'scribe');

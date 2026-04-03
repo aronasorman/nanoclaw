@@ -769,8 +769,8 @@ describe('WsfChannel Scribe passive observer (Phase 5)', () => {
 
     // Check that registerGroup was called for scribe with readonly: false
     const registerGroup = opts.registerGroup as ReturnType<typeof vi.fn>;
-    const scribeCall = registerGroup.mock.calls.find(
-      (call: unknown[]) => String(call[0]).includes(':scribe'),
+    const scribeCall = registerGroup.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes(':scribe'),
     );
     expect(scribeCall).toBeDefined();
     const config = scribeCall![1].containerConfig;
@@ -785,8 +785,7 @@ describe('WsfChannel Scribe passive observer (Phase 5)', () => {
     const architectPath = path.join(ROLES_DIR, 'architect.md');
     const scribePath = path.join(ROLES_DIR, 'scribe.md');
     existsSyncMock.mockImplementation(
-      (p: unknown) =>
-        String(p) === architectPath || String(p) === scribePath,
+      (p: unknown) => String(p) === architectPath || String(p) === scribePath,
     );
     readdirSyncMock.mockReturnValue(['architect.md', 'scribe.md']);
 
@@ -809,8 +808,8 @@ describe('WsfChannel Scribe passive observer (Phase 5)', () => {
     await (channel as any).deliverMessage(msg);
 
     const registerGroup = opts.registerGroup as ReturnType<typeof vi.fn>;
-    const architectCall = registerGroup.mock.calls.find(
-      (call: unknown[]) => String(call[0]).includes(':architect'),
+    const architectCall = registerGroup.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes(':architect'),
     );
     expect(architectCall).toBeDefined();
     const config = architectCall![1].containerConfig;
@@ -847,5 +846,171 @@ describe('WsfChannel Scribe passive observer (Phase 5)', () => {
     // Only base JID, no scribe
     expect(onMessage).toHaveBeenCalledTimes(1);
     expect(onMessage.mock.calls[0][0]).toBe('wsf:t_scr5');
+  });
+});
+
+describe('WsfChannel execution target filtering (Phase 6)', () => {
+  let channel: WsfChannel;
+  let opts: ChannelOpts;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    opts = createOpts();
+    channel = new WsfChannel('http://localhost:8085', 'did:test:bot', opts);
+    (WsfChannel as any)._roleCache = null;
+  });
+
+  it('skips @mentioned role when target is machine:quiet4 (not this host)', async () => {
+    const architectPath = path.join(ROLES_DIR, 'architect.md');
+    const configPath = path.join(ROLES_DIR, 'config.yml.md');
+    existsSyncMock.mockImplementation(
+      (p: unknown) =>
+        String(p) === architectPath || String(p) === configPath,
+    );
+    readdirSyncMock.mockReturnValue(['architect.md', 'config.yml.md']);
+    // Return config with architect targeted to machine:quiet4
+    readFileSyncMock.mockReturnValue(
+      '```yaml\nroles:\n  architect:\n    provider: anthropic\n    target: machine:quiet4\n```',
+    );
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return {
+        ok: true,
+        json: async () => ({ id: 't_tgt1', status: 'open' }),
+      };
+    });
+
+    const msg = {
+      id: 'msg_tgt1',
+      threadId: 't_tgt1',
+      sender: 'did:user:alice',
+      body: 'Hey @architect review this',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // Only base JID — architect skipped due to target mismatch
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][0]).toBe('wsf:t_tgt1');
+  });
+
+  it('executes role when target is host and this is the host', async () => {
+    const pmPath = path.join(ROLES_DIR, 'pm.md');
+    const configPath = path.join(ROLES_DIR, 'config.yml.md');
+    existsSyncMock.mockImplementation(
+      (p: unknown) =>
+        String(p) === pmPath || String(p) === configPath,
+    );
+    readdirSyncMock.mockReturnValue(['pm.md', 'config.yml.md']);
+    readFileSyncMock.mockReturnValue(
+      '```yaml\nroles:\n  pm:\n    provider: anthropic\n    target: host\n```',
+    );
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return {
+        ok: true,
+        json: async () => ({ id: 't_tgt2', status: 'open' }),
+      };
+    });
+
+    const msg = {
+      id: 'msg_tgt2',
+      threadId: 't_tgt2',
+      sender: 'did:user:bob',
+      body: 'Hey @pm start this',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // Base JID + PM role JID (host target matches)
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage.mock.calls[1][0]).toBe('wsf:t_tgt2:pm');
+  });
+
+  it('executes role when target is empty (any machine)', async () => {
+    const implPath = path.join(ROLES_DIR, 'implementer.md');
+    const configPath = path.join(ROLES_DIR, 'config.yml.md');
+    existsSyncMock.mockImplementation(
+      (p: unknown) =>
+        String(p) === implPath || String(p) === configPath,
+    );
+    readdirSyncMock.mockReturnValue(['implementer.md', 'config.yml.md']);
+    readFileSyncMock.mockReturnValue(
+      '```yaml\nroles:\n  implementer:\n    provider: zai\n```',
+    );
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return {
+        ok: true,
+        json: async () => ({ id: 't_tgt3', status: 'open' }),
+      };
+    });
+
+    const msg = {
+      id: 'msg_tgt3',
+      threadId: 't_tgt3',
+      sender: 'did:user:carol',
+      body: 'Hey @implementer build this',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // Base JID + implementer (no target = any machine)
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage.mock.calls[1][0]).toBe('wsf:t_tgt3:implementer');
+  });
+
+  it('skips scribe when scribe target does not match', async () => {
+    const scribePath = path.join(ROLES_DIR, 'scribe.md');
+    const configPath = path.join(ROLES_DIR, 'config.yml.md');
+    existsSyncMock.mockImplementation(
+      (p: unknown) =>
+        String(p) === scribePath || String(p) === configPath,
+    );
+    readdirSyncMock.mockReturnValue(['scribe.md', 'config.yml.md']);
+    readFileSyncMock.mockReturnValue(
+      '```yaml\nroles:\n  scribe:\n    provider: anthropic\n    target: machine:quiet4\n```',
+    );
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    const msg = {
+      id: 'msg_tgt4',
+      threadId: 't_tgt4',
+      sender: 'did:user:dave',
+      body: 'Regular message',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // Only base JID — scribe skipped due to target mismatch
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][0]).toBe('wsf:t_tgt4');
   });
 });
