@@ -569,9 +569,11 @@ export class WsfChannel implements Channel {
     const existing = baseConfig.additionalMounts || [];
     const hasWiki = existing.some((m) => m.containerPath === 'wiki');
     if (!hasWiki) {
+      // Scribe gets read-write wiki access; all other roles get read-only
+      const wikiReadonly = role !== 'scribe';
       baseConfig.additionalMounts = [
         ...existing,
-        { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: true },
+        { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: wikiReadonly },
       ];
     }
 
@@ -611,9 +613,7 @@ export class WsfChannel implements Channel {
         `${this.serverUrl}/threads/${threadId}/messages`,
       );
       if (!resp.ok) {
-        logger.warn(
-          `[wsf] Failed to fetch thread history: ${resp.status}`,
-        );
+        logger.warn(`[wsf] Failed to fetch thread history: ${resp.status}`);
         return null;
       }
       const messages: WsfMessage[] = (await resp.json()) as WsfMessage[];
@@ -677,9 +677,7 @@ export class WsfChannel implements Channel {
         this.onMessage(jid, buildMessage(jid));
       }
     } else {
-      logger.info(
-        `[wsf] Delivering message ${msg.id} to ${jid}`,
-      );
+      logger.info(`[wsf] Delivering message ${msg.id} to ${jid}`);
       this.onMessage(jid, buildMessage(jid));
     }
 
@@ -701,6 +699,30 @@ export class WsfChannel implements Channel {
       } else {
         logger.info(`[wsf] Routing @${role} mention to ${roleJid}`);
         this.onMessage(roleJid, buildMessage(roleJid));
+      }
+    }
+
+    // Scribe receives ALL messages as passive observer (like PM/base JID).
+    // Only activate if scribe role file exists.
+    const scribeRoleFile = path.join(ROLES_DIR, 'scribe.md');
+    if (
+      fs.existsSync(scribeRoleFile) &&
+      !roles.includes('scribe') // avoid double-delivery if explicitly @mentioned
+    ) {
+      const scribeJid = WsfChannel.roleJid(msg.threadId, 'scribe');
+      await this.ensureRoleRegistered(msg.threadId, 'scribe');
+
+      if (!this.historyInjected.has(scribeJid)) {
+        this.historyInjected.add(scribeJid);
+        const history = await this.fetchThreadHistory(msg.threadId, msg.id);
+        const enriched = history ? `${history}\n\n${content}` : content;
+        logger.info(
+          `[wsf] Delivering to scribe ${scribeJid} with thread history`,
+        );
+        this.onMessage(scribeJid, buildMessage(scribeJid, enriched));
+      } else {
+        logger.info(`[wsf] Delivering to scribe ${scribeJid}`);
+        this.onMessage(scribeJid, buildMessage(scribeJid));
       }
     }
   }

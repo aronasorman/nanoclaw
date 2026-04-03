@@ -267,7 +267,10 @@ describe('WsfChannel @mention routing (deliverMessage)', () => {
       if (String(url).includes('/messages')) {
         return { ok: true, json: async () => [] };
       }
-      return { ok: true, json: async () => ({ id: 't_3dcd0c25', status: 'open' }) };
+      return {
+        ok: true,
+        json: async () => ({ id: 't_3dcd0c25', status: 'open' }),
+      };
     });
 
     const msg = {
@@ -585,9 +588,13 @@ describe('WsfChannel thread history injection (Phase 4)', () => {
     const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
     const delivered = onMessage.mock.calls[0][1];
     // History section should only have the old message, not the current one
-    const historySection = delivered.content.split('--- End Thread History ---')[0];
+    const historySection = delivered.content.split(
+      '--- End Thread History ---',
+    )[0];
     expect(historySection).toContain('This should appear in history');
-    expect(historySection).not.toContain('This should be excluded from history');
+    expect(historySection).not.toContain(
+      'This should be excluded from history',
+    );
   });
 
   it('injects history for role JIDs independently from base JID', async () => {
@@ -663,5 +670,182 @@ describe('WsfChannel thread history injection (Phase 4)', () => {
     expect(onMessage).toHaveBeenCalledTimes(1);
     // Falls back to delivering without history
     expect(onMessage.mock.calls[0][1].content).toBe('Should still deliver');
+  });
+});
+
+describe('WsfChannel Scribe passive observer (Phase 5)', () => {
+  let channel: WsfChannel;
+  let opts: ChannelOpts;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    opts = createOpts();
+    channel = new WsfChannel('http://localhost:8085', 'did:test:bot', opts);
+    (WsfChannel as any)._roleCache = null;
+  });
+
+  it('delivers every message to scribe when scribe.md exists', async () => {
+    const scribePath = path.join(ROLES_DIR, 'scribe.md');
+    existsSyncMock.mockImplementation((p: unknown) => String(p) === scribePath);
+    readdirSyncMock.mockReturnValue(['scribe.md']);
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({ id: 't_scr1', status: 'open' }) };
+    });
+
+    const msg = {
+      id: 'msg_s1',
+      threadId: 't_scr1',
+      sender: 'did:user:alice',
+      body: 'Just a regular message, no mentions',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // 2 calls: base JID + scribe JID
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage.mock.calls[0][0]).toBe('wsf:t_scr1');
+    expect(onMessage.mock.calls[1][0]).toBe('wsf:t_scr1:scribe');
+  });
+
+  it('does not double-deliver to scribe when explicitly @mentioned', async () => {
+    const scribePath = path.join(ROLES_DIR, 'scribe.md');
+    existsSyncMock.mockImplementation((p: unknown) => String(p) === scribePath);
+    readdirSyncMock.mockReturnValue(['scribe.md']);
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({ id: 't_scr2', status: 'open' }) };
+    });
+
+    const msg = {
+      id: 'msg_s2',
+      threadId: 't_scr2',
+      sender: 'did:user:bob',
+      body: 'Hey @scribe capture this',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // 2 calls: base JID + scribe (via @mention, NOT duplicated)
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage.mock.calls[0][0]).toBe('wsf:t_scr2');
+    expect(onMessage.mock.calls[1][0]).toBe('wsf:t_scr2:scribe');
+  });
+
+  it('scribe gets read-write wiki mount', async () => {
+    const scribePath = path.join(ROLES_DIR, 'scribe.md');
+    existsSyncMock.mockImplementation((p: unknown) => String(p) === scribePath);
+    readdirSyncMock.mockReturnValue(['scribe.md']);
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({ id: 't_scr3', status: 'open' }) };
+    });
+
+    const msg = {
+      id: 'msg_s3',
+      threadId: 't_scr3',
+      sender: 'did:user:carol',
+      body: 'testing scribe mounts',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    // Check that registerGroup was called for scribe with readonly: false
+    const registerGroup = opts.registerGroup as ReturnType<typeof vi.fn>;
+    const scribeCall = registerGroup.mock.calls.find(
+      (call: unknown[]) => String(call[0]).includes(':scribe'),
+    );
+    expect(scribeCall).toBeDefined();
+    const config = scribeCall![1].containerConfig;
+    const wikiMount = config.additionalMounts?.find(
+      (m: any) => m.containerPath === 'wiki',
+    );
+    expect(wikiMount).toBeDefined();
+    expect(wikiMount!.readonly).toBe(false);
+  });
+
+  it('non-scribe roles get read-only wiki mount', async () => {
+    const architectPath = path.join(ROLES_DIR, 'architect.md');
+    const scribePath = path.join(ROLES_DIR, 'scribe.md');
+    existsSyncMock.mockImplementation(
+      (p: unknown) =>
+        String(p) === architectPath || String(p) === scribePath,
+    );
+    readdirSyncMock.mockReturnValue(['architect.md', 'scribe.md']);
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({ id: 't_scr4', status: 'open' }) };
+    });
+
+    const msg = {
+      id: 'msg_s4',
+      threadId: 't_scr4',
+      sender: 'did:user:dave',
+      body: 'Hey @architect design this',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const registerGroup = opts.registerGroup as ReturnType<typeof vi.fn>;
+    const architectCall = registerGroup.mock.calls.find(
+      (call: unknown[]) => String(call[0]).includes(':architect'),
+    );
+    expect(architectCall).toBeDefined();
+    const config = architectCall![1].containerConfig;
+    const wikiMount = config.additionalMounts?.find(
+      (m: any) => m.containerPath === 'wiki',
+    );
+    expect(wikiMount).toBeDefined();
+    expect(wikiMount!.readonly).toBe(true);
+  });
+
+  it('does not deliver to scribe when scribe.md does not exist', async () => {
+    existsSyncMock.mockReturnValue(false);
+    readdirSyncMock.mockReturnValue([]);
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/messages')) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    const msg = {
+      id: 'msg_s5',
+      threadId: 't_scr5',
+      sender: 'did:user:eve',
+      body: 'No scribe here',
+      tag: 'note',
+      createdAt: new Date().toISOString(),
+    };
+
+    await (channel as any).deliverMessage(msg);
+
+    const onMessage = opts.onMessage as ReturnType<typeof vi.fn>;
+    // Only base JID, no scribe
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage.mock.calls[0][0]).toBe('wsf:t_scr5');
   });
 });
