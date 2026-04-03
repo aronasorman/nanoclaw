@@ -86,11 +86,74 @@ export class WsfChannel implements Channel {
     return `${WSF_JID_PREFIX}${threadId}`;
   }
 
-  /** Extract thread ID from virtual JID, or null if not a WSF JID */
+  /** Extract thread ID from virtual JID, or null if not a WSF JID.
+   *  Handles both wsf:t_xxx and wsf:t_xxx:role formats. */
   static threadIdFromJid(jid: string): string | null {
     if (!jid.startsWith(WSF_JID_PREFIX)) return null;
-    const id = jid.slice(WSF_JID_PREFIX.length);
-    return id === 'default' ? null : id;
+    const rest = jid.slice(WSF_JID_PREFIX.length);
+    if (rest === 'default') return null;
+    // Strip role suffix if present: t_xxx:role -> t_xxx
+    const colonIdx = rest.indexOf(':');
+    return colonIdx >= 0 ? rest.slice(0, colonIdx) : rest;
+  }
+
+  /** Build a role-specific JID: wsf:t_{threadId}:{role} */
+  static roleJid(threadId: string, role: string): string {
+    return `${WSF_JID_PREFIX}${threadId}:${role}`;
+  }
+
+  /** Extract role from a role-specific JID, or undefined if base JID */
+  static parseRoleFromJid(jid: string): string | undefined {
+    if (!jid.startsWith(WSF_JID_PREFIX)) return undefined;
+    const rest = jid.slice(WSF_JID_PREFIX.length);
+    const colonIdx = rest.indexOf(':');
+    return colonIdx >= 0 ? rest.slice(colonIdx + 1) : undefined;
+  }
+
+  /** Return the set of available role names (cached, refreshed periodically). */
+  private static _roleCache: Set<string> | null = null;
+  private static _roleCacheTime = 0;
+  private static readonly ROLE_CACHE_TTL_MS = 30_000;
+
+  static availableRoles(): Set<string> {
+    const now = Date.now();
+    if (
+      WsfChannel._roleCache &&
+      now - WsfChannel._roleCacheTime < WsfChannel.ROLE_CACHE_TTL_MS
+    ) {
+      return WsfChannel._roleCache;
+    }
+    const roles = new Set<string>();
+    try {
+      const entries = fs.readdirSync(ROLES_DIR);
+      for (const e of entries) {
+        if (e.endsWith('.md')) roles.add(e.slice(0, -3));
+      }
+    } catch {
+      // ROLES_DIR may not exist yet
+    }
+    WsfChannel._roleCache = roles;
+    WsfChannel._roleCacheTime = now;
+    return roles;
+  }
+
+  /** Extract valid @role mentions from message body.
+   *  Only returns roles that have a matching file in ROLES_DIR. */
+  static parseMentions(body: string): string[] {
+    const matches = body.match(/@(\w+)/g);
+    if (!matches) return [];
+    const available = WsfChannel.availableRoles();
+    const roles: string[] = [];
+    const seen = new Set<string>();
+    for (const m of matches) {
+      const role = m.slice(1); // strip @
+      if (seen.has(role)) continue;
+      seen.add(role);
+      if (available.has(role)) {
+        roles.push(role);
+      }
+    }
+    return roles;
   }
 
   async connect(): Promise<void> {
@@ -138,7 +201,7 @@ export class WsfChannel implements Channel {
         logger.info(
           `[wsf] WS message: ${msg.id} on ${msg.threadId} from ${msg.sender.slice(-8)}`,
         );
-        this.deliverMessage(msg);
+        await this.deliverMessage(msg);
       } catch {
         // skip unparseable messages
       }
@@ -270,10 +333,40 @@ export class WsfChannel implements Channel {
         if (msg.sender === this.botDid) continue;
         if (this.seenMessages.has(msg.id)) continue;
         this.seenMessages.add(msg.id);
-        this.deliverMessage(msg);
+        await this.deliverMessage(msg);
       }
     } catch (err) {
       logger.warn(`[wsf] Fetch messages error: ${err}`);
+    }
+  }
+
+  /**
+   * Copy Claude credentials from wsf-tasks to a thread/role folder.
+   * Handles initial copy and stale symlink replacement.
+   */
+  private copyCredentials(folder: string): void {
+    const dataDir = path.resolve(GROUPS_DIR, '..', 'data');
+    const baseCreds = path.join(
+      dataDir,
+      'sessions',
+      'wsf-tasks',
+      '.claude',
+      '.credentials.json',
+    );
+    const sessionDir = path.join(dataDir, 'sessions', folder, '.claude');
+    const creds = path.join(sessionDir, '.credentials.json');
+
+    if (!fs.existsSync(baseCreds)) return;
+
+    if (!fs.existsSync(creds)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.copyFileSync(baseCreds, creds);
+      logger.info(`[wsf] Copied credentials for ${folder}`);
+    } else if (fs.lstatSync(creds).isSymbolicLink()) {
+      // Replace stale symlink with a copy
+      fs.unlinkSync(creds);
+      fs.copyFileSync(baseCreds, creds);
+      logger.info(`[wsf] Replaced symlink with copy for ${folder} credentials`);
     }
   }
 
@@ -282,11 +375,11 @@ export class WsfChannel implements Channel {
    * Each thread gets its own folder (wsf-t-XXXX) for session/IPC isolation.
    *
    * If the thread has a `role` field and a matching role file exists at
-   * /home/aron/vaults/02-AGENTS/_global/roles/{role}.md, sets claudeMdSource
-   * to that path (container-runner.ts bind-mounts it as CLAUDE.md).
+   * ROLES_DIR/{role}.md, sets claudeMdSource to that path
+   * (container-runner.ts bind-mounts it as CLAUDE.md).
    * Otherwise falls back to copying CLAUDE.md from the base wsf-tasks folder.
    */
-  async ensureThreadRegistered(jid: string): Promise<void> {
+  private async ensureThreadRegistered(jid: string): Promise<void> {
     const groups = this.registeredGroups();
     if (groups[jid]) return;
     if (!this.registerGroup) {
@@ -306,7 +399,9 @@ export class WsfChannel implements Channel {
         role = thread.role || undefined;
       }
     } catch (err) {
-      logger.warn(`[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`);
+      logger.warn(
+        `[wsf] Failed to fetch thread metadata for ${threadId}: ${err}`,
+      );
     }
 
     // Resolve role file if specified
@@ -315,7 +410,9 @@ export class WsfChannel implements Channel {
       const candidate = path.join(ROLES_DIR, `${role}.md`);
       if (fs.existsSync(candidate)) {
         roleFilePath = candidate;
-        logger.info(`[wsf] Thread ${threadId} has role '${role}', using ${candidate}`);
+        logger.info(
+          `[wsf] Thread ${threadId} has role '${role}', using ${candidate}`,
+        );
       } else {
         logger.warn(
           `[wsf] Thread ${threadId} has role '${role}' but ${candidate} not found, falling back to default CLAUDE.md`,
@@ -344,33 +441,7 @@ export class WsfChannel implements Channel {
       }
     }
 
-    // Copy Claude credentials so the container can authenticate.
-    // OneCLI gateway isn't reachable; containers rely on this file.
-    // We copy instead of symlink because Docker bind-mounts don't resolve
-    // host-path symlinks inside the container.
-    const dataDir = path.resolve(GROUPS_DIR, '..', 'data');
-    const baseCreds = path.join(
-      dataDir,
-      'sessions',
-      'wsf-tasks',
-      '.claude',
-      '.credentials.json',
-    );
-    const threadSessionDir = path.join(dataDir, 'sessions', folder, '.claude');
-    const threadCreds = path.join(threadSessionDir, '.credentials.json');
-    if (fs.existsSync(baseCreds) && !fs.existsSync(threadCreds)) {
-      fs.mkdirSync(threadSessionDir, { recursive: true });
-      fs.copyFileSync(baseCreds, threadCreds);
-      logger.info(`[wsf] Copied credentials for ${folder}`);
-    } else if (
-      fs.existsSync(baseCreds) &&
-      fs.lstatSync(threadCreds).isSymbolicLink()
-    ) {
-      // Replace stale symlink with a copy
-      fs.unlinkSync(threadCreds);
-      fs.copyFileSync(baseCreds, threadCreds);
-      logger.info(`[wsf] Replaced symlink with copy for ${folder} credentials`);
-    }
+    this.copyCredentials(folder);
 
     // Inherit containerConfig from the base wsf-tasks group (repo mounts, etc.)
     const baseGroup =
@@ -385,15 +456,14 @@ export class WsfChannel implements Channel {
     if (roleFilePath) {
       baseConfig.claudeMdSource = roleFilePath;
 
-      const wikiMount = {
-        hostPath: WIKI_VAULT_PATH,
-        containerPath: 'wiki',
-        readonly: true,
-      };
-      baseConfig.additionalMounts = [
-        ...(baseConfig.additionalMounts || []),
-        wikiMount,
-      ];
+      const existing = baseConfig.additionalMounts || [];
+      const hasWiki = existing.some((m) => m.containerPath === 'wiki');
+      if (!hasWiki) {
+        baseConfig.additionalMounts = [
+          ...existing,
+          { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: true },
+        ];
+      }
     }
 
     this.registerGroup(jid, {
@@ -409,23 +479,95 @@ export class WsfChannel implements Channel {
     logger.info(`[wsf] Registered thread group: ${jid} (folder: ${folder})`);
   }
 
-  private deliverMessage(msg: WsfMessage): void {
+  /**
+   * Register a role-specific group JID (wsf:t_xxx:role) for @mention routing.
+   * Each role gets its own folder and claudeMdSource pointing to the role file.
+   */
+  private async ensureRoleRegistered(
+    threadId: string,
+    role: string,
+  ): Promise<void> {
+    const jid = WsfChannel.roleJid(threadId, role);
+    const groups = this.registeredGroups();
+    if (groups[jid]) return;
+    if (!this.registerGroup) {
+      logger.warn(
+        `[wsf] registerGroup not available, cannot register role ${jid}`,
+      );
+      return;
+    }
+
+    const roleFilePath = path.join(ROLES_DIR, `${role}.md`);
+    if (!fs.existsSync(roleFilePath)) {
+      logger.warn(`[wsf] Role file not found: ${roleFilePath}`);
+      return;
+    }
+
+    const folder = `wsf-${threadId.replace(/_/g, '-')}-${role}`;
+    fs.mkdirSync(path.join(GROUPS_DIR, folder, 'logs'), { recursive: true });
+    this.copyCredentials(folder);
+
+    // Inherit containerConfig from base wsf-tasks group
+    const baseGroup =
+      groups['wsf:default'] ||
+      Object.values(groups).find((g) => g.folder === 'wsf-tasks');
+    const baseConfig: ContainerConfig = baseGroup?.containerConfig
+      ? { ...baseGroup.containerConfig }
+      : {};
+
+    baseConfig.claudeMdSource = roleFilePath;
+    const existing = baseConfig.additionalMounts || [];
+    const hasWiki = existing.some((m) => m.containerPath === 'wiki');
+    if (!hasWiki) {
+      baseConfig.additionalMounts = [
+        ...existing,
+        { hostPath: WIKI_VAULT_PATH, containerPath: 'wiki', readonly: true },
+      ];
+    }
+
+    this.registerGroup(jid, {
+      name: `WSF Tasks (${role})`,
+      folder,
+      trigger: '',
+      requiresTrigger: false,
+      added_at: new Date().toISOString(),
+      containerConfig: baseConfig,
+    });
+    logger.info(`[wsf] Registered role group: ${jid} (folder: ${folder})`);
+  }
+
+  private async deliverMessage(msg: WsfMessage): Promise<void> {
+    // Skip self-delivery: bot's own replies flow back via WebSocket
+    if (msg.sender === this.botDid) return;
+
     const jid = WsfChannel.threadJid(msg.threadId);
     // Include details (full task spec) if present — body alone is just the summary
     const content = msg.details ? `${msg.body}\n\n${msg.details}` : msg.body;
-    const newMessage: NewMessage = {
+
+    const buildMessage = (targetJid: string): NewMessage => ({
       id: msg.id,
-      chat_jid: jid,
+      chat_jid: targetJid,
       sender: msg.sender,
       sender_name: msg.sender.split(':').pop() || msg.sender,
       content,
       timestamp: msg.createdAt,
       thread_id: msg.threadId,
-    };
+    });
+
+    // Always deliver to the base thread JID (PM sees everything)
     logger.info(
       `[wsf] Delivering message ${msg.id} to ${jid} (${msg.body.slice(0, 50)}...)`,
     );
-    this.onMessage(jid, newMessage);
+    this.onMessage(jid, buildMessage(jid));
+
+    // Parse @mentions and route to role-specific containers
+    const roles = WsfChannel.parseMentions(msg.body);
+    for (const role of roles) {
+      const roleJid = WsfChannel.roleJid(msg.threadId, role);
+      await this.ensureRoleRegistered(msg.threadId, role);
+      logger.info(`[wsf] Routing @${role} mention to ${roleJid}`);
+      this.onMessage(roleJid, buildMessage(roleJid));
+    }
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
